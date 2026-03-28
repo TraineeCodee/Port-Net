@@ -22,19 +22,51 @@ window.logout = logout;
 window.selectRole = selectRole;
 window.loadPortalView = loadPortalView;
 window.simulateAction = simulateAction;
+window.toggleAuthMode = toggleAuthMode;
 
 // Initialize Lucide Icons
 lucide.createIcons();
 
-// State
+// Auth State
+let authMode = 'login'; // 'login' or 'register'
 let currentRole = 'manager';
 let isLoggedIn = false;
 let currentPortalView = '';
+let currentUser = null;
 
 // Data
 let mockVessels = [];
 let mockCargo = [];
 let mockTasks = [];
+let mockOperations = [];
+window.showHistory = {};
+
+window.toggleHistory = function(viewId) {
+    window.showHistory[viewId] = !window.showHistory[viewId];
+    loadPortalView(viewId);
+};
+
+window.approveVesselDocking = async function(dbId, vesselName) {
+    try {
+        await updateDoc(doc(db, "vessels", dbId), { status: 'Docked' });
+        showToast(`${vesselName} docking has been approved and marked as Docked.`);
+        await window.fetchFromDatabase(); // Refresh data
+    } catch (error) {
+        console.error("Error updating vessel status: ", error);
+        showToast("Error updating vessel. Check console.");
+    }
+};
+
+window.releaseVessel = async function(dbId, vesselName) {
+    try {
+        await updateDoc(doc(db, "vessels", dbId), { status: 'Released' });
+        showToast(`${vesselName} has been released.`);
+        await window.fetchFromDatabase(); // Refresh data
+    } catch (error) {
+        console.error("Error updating vessel status: ", error);
+        showToast("Error releasing vessel. Check console.");
+    }
+};
 
 window.fetchFromDatabase = async function() {
     try {
@@ -43,14 +75,6 @@ window.fetchFromDatabase = async function() {
         mockVessels = await Promise.all(vesselsSnapshot.docs.map(async (d) => {
             const data = d.data();
             let status = data.status;
-            // Check if ETA has passed
-            if (data.eta && status === 'In Transit') {
-                const etaDate = new Date(data.eta);
-                if (!isNaN(etaDate.getTime()) && now >= etaDate) {
-                    status = 'Docked';
-                    try { await updateDoc(doc(db, "vessels", d.id), { status: 'Docked' }); } catch(e) { console.error(e); }
-                }
-            }
             return { dbId: d.id, ...data, status };
         }));
 
@@ -59,6 +83,9 @@ window.fetchFromDatabase = async function() {
         
         const tasksSnapshot = await getDocs(collection(db, "tasks"));
         mockTasks = tasksSnapshot.docs.map(doc => ({ dbId: doc.id, ...doc.data() }));
+
+        const opsSnapshot = await getDocs(collection(db, "operations"));
+        mockOperations = opsSnapshot.docs.map(doc => ({ dbId: doc.id, ...doc.data() }));
 
         // Refresh Current View if Portal Data changed
         if (currentPortalView && document.querySelector('.portal-layout.active')) {
@@ -78,6 +105,14 @@ window.submitCargoUpload = async function() {
     if (!type || !origin) {
         showToast("Please fill out all cargo details.");
         return;
+    }
+    
+    if (weight !== 'N/A') {
+        const parsedWeight = parseFloat(weight);
+        if (isNaN(parsedWeight) || parsedWeight <= 0) {
+            showToast("Total weight must be greater than 0 tons.");
+            return;
+        }
     }
 
     try {
@@ -163,6 +198,30 @@ window.submitNewTask = async function() {
     }
 };
 
+window.submitNewOperation = async function() {
+    const activity = document.getElementById('new-operation-activity').value;
+    const location = document.getElementById('new-operation-location').value;
+
+    if (!activity.trim() || !location.trim()) {
+        showToast("Please provide both activity and location.");
+        return;
+    }
+
+    try {
+        await addDoc(collection(db, "operations"), {
+            operator: document.getElementById('nav-username').textContent,
+            activity: activity,
+            location: location,
+            createdAt: serverTimestamp()
+        });
+        showToast("Activity logged successfully.");
+        await window.fetchFromDatabase(); // Refresh data
+    } catch (error) {
+        console.error("Error adding operation: ", error);
+        showToast("Error adding operation. Check console.");
+    }
+};
+
 window.clearCargo = async function(cargoDbId, vesselName) {
     try {
         await updateDoc(doc(db, "cargo", cargoDbId), { status: 'Cleared' });
@@ -214,6 +273,7 @@ function navigateTo(viewId) {
         let defaultView = 'manager-dashboard';
         if (currentRole === 'agent') defaultView = 'agent-dashboard';
         else if (currentRole === 'worker') defaultView = 'worker-tasks';
+        else if (currentRole === 'operator') defaultView = 'operator-dashboard';
         loadPortalView(defaultView);
     }
 }
@@ -225,10 +285,27 @@ function selectRole(role) {
     document.querySelector(`[data-role="${role}"]`).classList.add('active');
 }
 
+function toggleAuthMode() {
+    authMode = authMode === 'login' ? 'register' : 'login';
+    const title = document.getElementById('auth-title');
+    const submitBtn = document.getElementById('auth-submit-btn');
+    const toggleLink = document.getElementById('auth-toggle-btn');
+    
+    if (authMode === 'register') {
+        title.textContent = 'Create an Account';
+        submitBtn.textContent = 'Register & Login';
+        toggleLink.innerHTML = 'Already have an account? <a>Login here</a>';
+    } else {
+        title.textContent = 'Welcome Back';
+        submitBtn.textContent = 'Login';
+        toggleLink.innerHTML = 'Need to register? <a>Create an account</a>';
+    }
+}
+
 document.getElementById('login-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     
-    const username = document.getElementById('login-username').value;
+    const username = document.getElementById('login-username').value.trim();
     const password = document.getElementById('login-password').value;
     
     if (username.length < 4) {
@@ -239,6 +316,70 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     if (password.length < 6) {
         showToast("Password must be at least 6 characters long.");
         return;
+    }
+    
+    const adminCredentials = {
+        'manager': { user: 'admin_manager', pass: 'PortNet@2026' },
+        'operator': { user: 'admin_operator', pass: 'Operator@2026' },
+        'worker': { user: 'admin_worker', pass: 'Worker@2026' }
+    };
+    
+    if (adminCredentials[currentRole]) {
+        if (authMode === 'register') {
+            showToast(`${currentRole}s cannot be registered here. Please contact System Administrator.`);
+            return;
+        }
+        
+        const validCreds = adminCredentials[currentRole];
+        if (username !== validCreds.user || password !== validCreds.pass) {
+            showToast(`Invalid ${currentRole} credentials! Hint: ${validCreds.user} / ${validCreds.pass}`);
+            return;
+        }
+        
+        currentUser = { username: validCreds.user, role: currentRole };
+    } else {
+        showToast("Authenticating...");
+        try {
+            const usersSnapshot = await getDocs(collection(db, "users"));
+            const users = usersSnapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+            
+            const existingUser = users.find(u => u.username === username && u.role === currentRole);
+            
+            if (authMode === 'register') {
+                if (currentRole !== 'agent') {
+                    showToast(`Only Shipping Agents can register directly. Contact admin for a ${currentRole} account.`);
+                    return;
+                }
+                
+                if (existingUser) {
+                    showToast("Username already registered for this role. Please login.");
+                    return;
+                }
+                
+                await addDoc(collection(db, "users"), {
+                    username: username,
+                    password: password, // In production, never store plain text passwords!
+                    role: currentRole,
+                    createdAt: serverTimestamp()
+                });
+                showToast("Registration successful!");
+                currentUser = { username, role: currentRole };
+            } else {
+                if (!existingUser) {
+                    showToast(`No ${currentRole} found with that username. Please register.`);
+                    return;
+                }
+                if (existingUser.password !== password) {
+                    showToast("Incorrect password.");
+                    return;
+                }
+                currentUser = existingUser;
+            }
+        } catch (error) {
+            console.error("Auth Error:", error);
+            showToast("Authentication/Database error.");
+            return;
+        }
     }
 
     showToast("Connecting to Database...");
@@ -253,8 +394,9 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
     let displayRole = 'Port Manager';
     if (currentRole === 'agent') displayRole = 'Shipping Agent';
     else if (currentRole === 'worker') displayRole = 'Port Worker';
+    else if (currentRole === 'operator') displayRole = 'Terminal Operator';
     
-    document.getElementById('nav-username').textContent = displayRole;
+    document.getElementById('nav-username').textContent = `${username} (${displayRole})`;
     
     showToast(`Logged in successfully as ${displayRole}`);
     navigateTo('portal');
@@ -263,6 +405,7 @@ document.getElementById('login-form').addEventListener('submit', async (e) => {
 function logout() {
     isLoggedIn = false;
     currentRole = 'manager';
+    currentUser = null;
     
     // Reset Navbar
     document.getElementById('nav-login-btn').style.display = 'block';
@@ -307,6 +450,7 @@ function loadPortalSidebar() {
                 <i data-lucide="crosshair"></i> Track Vessel
             </div>
         `;
+
     } else if (currentRole === 'worker') {
         links = `
             <div class="sidebar-link active" onclick="loadPortalView('worker-tasks', this)">
@@ -314,6 +458,24 @@ function loadPortalSidebar() {
             </div>
             <div class="sidebar-link" onclick="loadPortalView('worker-vessels', this)">
                 <i data-lucide="anchor"></i> Docked Vessels
+            </div>
+        `;
+    } else if (currentRole === 'operator') {
+        links = `
+            <div class="sidebar-link active" onclick="loadPortalView('operator-dashboard', this)">
+                <i data-lucide="layout-dashboard"></i> Dashboard
+            </div>
+            <div class="sidebar-link" onclick="loadPortalView('operator-vessels', this)">
+                <i data-lucide="anchor"></i> Incoming Vessels
+            </div>
+            <div class="sidebar-link" onclick="loadPortalView('operator-control', this)">
+                <i data-lucide="navigation"></i> Terminal Control
+            </div>
+            <div class="sidebar-link" onclick="loadPortalView('operator-equipment', this)">
+                <i data-lucide="settings"></i> Manage Equipment
+            </div>
+            <div class="sidebar-link" onclick="loadPortalView('operator-operations', this)">
+                <i data-lucide="activity"></i> Operations
             </div>
         `;
     }
@@ -344,7 +506,11 @@ function loadPortalView(viewId, element = null) {
                 <div class="stats-grid">
                     <div class="stat-card">
                         <div class="stat-icon"><i data-lucide="ship"></i></div>
-                        <div class="stat-info"><h4>Active Vessels</h4><p>${mockVessels.filter(v => v.status !== 'Cleared for Departure').length}</p></div>
+                        <div class="stat-info"><h4>Active Vessels</h4><p>${mockVessels.filter(v => ['Docked', 'In Transit', 'Pending Clearance', 'Cleared for Departure'].includes(v.status)).length}</p></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.1); color: var(--success);"><i data-lucide="anchor"></i></div>
+                        <div class="stat-info"><h4>Released Vessels</h4><p>${mockVessels.filter(v => v.status === 'Released').length}</p></div>
                     </div>
                     <div class="stat-card">
                         <div class="stat-icon"><i data-lucide="box"></i></div>
@@ -390,6 +556,14 @@ function loadPortalView(viewId, element = null) {
                     </div>
                     <button class="btn btn-primary" onclick="submitNewVessel()">Add Vessel</button>
                 </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1rem;">
+                    <h3>Vessel Roster</h3>
+                    <button class="btn btn-outline" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;" onclick="toggleHistory('${viewId}')">
+                        ${window.showHistory[viewId] ? '<i data-lucide="eye-off" style="width:14px; height:14px; margin-right:4px;"></i> Hide History' : '<i data-lucide="eye" style="width:14px; height:14px; margin-right:4px;"></i> View All History'}
+                    </button>
+                </div>
+                
                 <div class="table-container">
                     <table class="data-table">
                         <thead>
@@ -402,7 +576,7 @@ function loadPortalView(viewId, element = null) {
                             </tr>
                         </thead>
                         <tbody>
-                            ${mockVessels.map(v => {
+                            ${mockVessels.filter(v => window.showHistory[viewId] ? true : !['Released'].includes(v.status)).map(v => {
                                 const etaFormatted = (!isNaN(new Date(v.eta).getTime())) ? new Date(v.eta).toLocaleString() : v.eta;
                                 return `
                                 <tr>
@@ -424,6 +598,12 @@ function loadPortalView(viewId, element = null) {
                     <h2>Monitor Cargo</h2>
                     <p>Real-time log of cargo movements.</p>
                 </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1rem;">
+                    <h3>Active Cargo Inventory</h3>
+                    <button class="btn btn-outline" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;" onclick="toggleHistory('${viewId}')">
+                        ${window.showHistory[viewId] ? '<i data-lucide="eye-off" style="width:14px; height:14px; margin-right:4px;"></i> Hide Cleared' : '<i data-lucide="eye" style="width:14px; height:14px; margin-right:4px;"></i> View All History'}
+                    </button>
+                </div>
                 <div class="table-container">
                     <table class="data-table">
                         <thead>
@@ -438,7 +618,7 @@ function loadPortalView(viewId, element = null) {
                             </tr>
                         </thead>
                         <tbody>
-                            ${mockCargo.map(c => `
+                            ${mockCargo.filter(c => window.showHistory[viewId] ? true : c.status !== 'Cleared').map(c => `
                                 <tr>
                                     <td><strong>${c.ref}</strong></td>
                                     <td>${c.type}</td>
@@ -580,7 +760,7 @@ function loadPortalView(viewId, element = null) {
                     </div>
                     <div class="form-group">
                         <label>Total Weight (Tons)</label>
-                        <input type="number" id="cargo-weight" placeholder="10.5" required />
+                        <input type="number" id="cargo-weight" placeholder="10.5" min="0.1" step="0.1" required />
                     </div>
                     <button class="btn btn-primary" onclick="submitCargoUpload()">Submit Details</button>
 np                </div>
@@ -684,6 +864,188 @@ np                </div>
                                 </tr>
                                 `
                             }).join('') : `<tr><td colspan="5" style="text-align:center;">No vessels are currently docked.</td></tr>`}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            break;
+            
+        // --- OPERATOR VIEWS ---
+        case 'operator-dashboard':
+            html = `
+                <div class="page-header" style="text-align: left; margin-bottom: 2rem;">
+                    <h2>Terminal Operator Dashboard</h2>
+                    <p>Manage terminal operations and equipment status.</p>
+                </div>
+                <div class="stats-grid">
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: rgba(59, 130, 246, 0.1); color: var(--primary);"><i data-lucide="settings"></i></div>
+                        <div class="stat-info"><h4>Active Equipment</h4><p>12</p></div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-icon" style="background: rgba(16, 185, 129, 0.1); color: var(--success);"><i data-lucide="activity"></i></div>
+                        <div class="stat-info"><h4>Operations Running</h4><p>5</p></div>
+                    </div>
+                </div>
+            `;
+            break;
+        case 'operator-equipment':
+            html = `
+                <div class="page-header" style="text-align: left; margin-bottom: 2rem;">
+                    <h2>Manage Equipment</h2>
+                    <p>Status of cranes, forklifts, and terminal vehicles.</p>
+                </div>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Equipment ID</th>
+                                <th>Type</th>
+                                <th>Status</th>
+                                <th>Current Task</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td><strong>CRN-01</strong></td>
+                                <td>Gantry Crane</td>
+                                <td><span class="badge badge-success">Operational</span></td>
+                                <td>Loading Vessel V-1234</td>
+                            </tr>
+                            <tr>
+                                <td><strong>FL-05</strong></td>
+                                <td>Forklift</td>
+                                <td><span class="badge badge-warning">Maintenance</span></td>
+                                <td>None</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            break;
+        case 'operator-operations':
+            html = `
+                <div class="page-header" style="text-align: left; margin-bottom: 2rem;">
+                    <h2>Terminal Operations Log</h2>
+                    <p>Track and record your current terminal activities.</p>
+                </div>
+                <div class="card form-container" style="max-width: 600px; margin-bottom: 2rem;">
+                    <div class="form-group">
+                        <label>Activity Description</label>
+                        <input type="text" id="new-operation-activity" placeholder="e.g. Loading Containers on V-1234, Maintenance check" required />
+                    </div>
+                    <div class="form-group">
+                        <label>Location / Bay</label>
+                        <input type="text" id="new-operation-location" placeholder="e.g. Docking Bay 4, Gate B" required />
+                    </div>
+                    <button class="btn btn-primary" onclick="submitNewOperation()">Log Activity</button>
+                </div>
+                
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1rem;">
+                    <h3>Recent Operations</h3>
+                    <button class="btn btn-outline" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;" onclick="toggleHistory('${viewId}')">
+                        ${window.showHistory[viewId] ? '<i data-lucide="eye-off" style="width:14px; height:14px; margin-right:4px;"></i> Hide Older Logs' : '<i data-lucide="eye" style="width:14px; height:14px; margin-right:4px;"></i> View All Logs'}
+                    </button>
+                </div>
+                
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Timestamp</th>
+                                <th>Operator</th>
+                                <th>Activity</th>
+                                <th>Location</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${mockOperations.length ? (window.showHistory[viewId] ? mockOperations : mockOperations.slice().sort((a,b) => (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0)).slice(0, 5)).map(op => `
+                                <tr>
+                                    <td>${op.createdAt ? new Date(op.createdAt.seconds * 1000).toLocaleString() : 'Just now'}</td>
+                                    <td><strong>${op.operator}</strong></td>
+                                    <td>${op.activity}</td>
+                                    <td>${op.location}</td>
+                                </tr>
+                            `).join('') : '<tr><td colspan="4" style="text-align:center;">No recent operations logged.</td></tr>'}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            break;
+        case 'operator-vessels':
+            html = `
+                <div class="page-header" style="text-align: left; margin-bottom: 2rem;">
+                    <h2>Incoming Vessels</h2>
+                    <p>Verify and approve arriving vessels for docking.</p>
+                </div>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Vessel ID</th>
+                                <th>Name</th>
+                                <th>ETA</th>
+                                <th>Cargo</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${mockVessels.filter(v => v.status === 'In Transit').length ? mockVessels.filter(v => v.status === 'In Transit').map(v => {
+                                const etaFormatted = (!isNaN(new Date(v.eta).getTime())) ? new Date(v.eta).toLocaleString() : v.eta;
+                                return `
+                                <tr>
+                                    <td><strong>${v.id}</strong></td>
+                                    <td>${v.name}</td>
+                                    <td>${etaFormatted}</td>
+                                    <td>${v.cargo}</td>
+                                    <td><button class="btn btn-outline" style="padding: 0.2rem 0.5rem; font-size: 0.8rem;" onclick="approveVesselDocking('${v.dbId}', '${v.name}')">Approve Docking</button></td>
+                                </tr>
+                                `
+                            }).join('') : '<tr><td colspan="5" style="text-align:center;">No vessels currently in transit.</td></tr>'}
+                        </tbody>
+                    </table>
+                </div>
+            `;
+            break;
+        // --- TERMINAL CONTROL VIEW ---
+        case 'operator-control':
+            html = `
+                <div class="page-header" style="text-align: left; margin-bottom: 2rem;">
+                    <h2>Terminal Control</h2>
+                    <p>Approve docking requests and release vessels.</p>
+                </div>
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom: 1rem;">
+                    <h3>Arriving & Docked Vessels</h3>
+                    <button class="btn btn-outline" style="padding: 0.25rem 0.5rem; font-size: 0.8rem;" onclick="toggleHistory('${viewId}')">
+                        ${window.showHistory[viewId] ? '<i data-lucide="eye-off" style="width:14px; height:14px; margin-right:4px;"></i> Hide Released' : '<i data-lucide="eye" style="width:14px; height:14px; margin-right:4px;"></i> View All History'}
+                    </button>
+                </div>
+                <div class="table-container">
+                    <table class="data-table">
+                        <thead>
+                            <tr>
+                                <th>Vessel ID</th>
+                                <th>Name</th>
+                                <th>Status</th>
+                                <th>Action</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            ${mockVessels.filter(v => window.showHistory[viewId] ? true : !['Released'].includes(v.status)).map(v => `
+                                <tr>
+                                    <td><strong>${v.id}</strong></td>
+                                    <td>${v.name}</td>
+                                    <td><span class="badge ${v.status === 'Docked' ? 'badge-success' : (v.status === 'Released' ? 'badge-primary' : (v.status === 'Cleared for Departure' ? 'badge-success' : 'badge-warning'))}">${v.status}</span></td>
+                                    <td>
+                                        ${v.status === 'Pending Clearance' || v.status === 'In Transit' ? 
+                                            `<button class="btn btn-outline" style="padding: 0.25rem 0.5rem; font-size: 0.75rem" onclick="approveVesselDocking('${v.dbId}', '${v.name}')">Approve Dock</button>` : ''}
+                                        ${v.status === 'Docked' || v.status === 'Cleared for Departure' ? 
+                                            `<button class="btn btn-primary" style="padding: 0.25rem 0.5rem; font-size: 0.75rem" onclick="releaseVessel('${v.dbId}', '${v.name}')">Release Vessel</button>` : ''}
+                                        ${v.status === 'Released' ? 
+                                            `<span style="color:var(--text-muted); font-size:0.875rem;">Completed</span>` : ''}
+                                    </td>
+                                </tr>
+                            `).join('')}
                         </tbody>
                     </table>
                 </div>

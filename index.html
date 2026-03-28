@@ -93,13 +93,14 @@
                     <div class="card login-card">
                         <div class="login-header">
                             <i data-lucide="lock"></i>
-                            <h2>Sign In</h2>
+                            <h2 id="auth-title">Sign In</h2>
                             <p>Access your portal</p>
                         </div>
                         <div class="role-selector">
                             <button class="role-btn active" data-role="manager" onclick="selectRole('manager')">Port Manager</button>
                             <button class="role-btn" data-role="agent" onclick="selectRole('agent')">Shipping Agent</button>
                             <button class="role-btn" data-role="worker" onclick="selectRole('worker')">Port Worker</button>
+                            <button class="role-btn" data-role="operator" onclick="selectRole('operator')">Terminal Operator</button>
                         </div>
                         <form class="form-container" id="login-form">
                             <div class="form-group">
@@ -110,7 +111,10 @@
                                 <label>Password</label>
                                 <input type="password" id="login-password" placeholder="••••••••" minlength="6" required>
                             </div>
-                            <button type="submit" class="btn btn-primary btn-full">Login</button>
+                            <button type="submit" id="auth-submit-btn" class="btn btn-primary btn-full">Login</button>
+                            <div style="text-align: center; margin-top: 1rem; font-size: 0.9rem;">
+                                <span id="auth-toggle-btn" style="cursor: pointer; color: var(--primary);" onclick="toggleAuthMode()">Need to register? <a>Create an account</a></span>
+                            </div>
                         </form>
                     </div>
                 </div>
